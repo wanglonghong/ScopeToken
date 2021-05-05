@@ -681,6 +681,15 @@ contract ScopeToken is Context, IERC20, Ownable {
     using SafeMath for uint256;
     using Address for address;
 
+    struct FeeInfo {
+        uint256 minAmount;
+        uint256 maxAmount;
+        uint256 rewardTaxFee;
+        uint256 liquidityFee;
+        uint256 burnFee;
+        uint256 treasuryFee;        
+    }
+
     mapping (address => uint256) private _rOwned;
     mapping (address => uint256) private _tOwned;
     mapping (address => mapping (address => uint256)) private _allowances;
@@ -688,6 +697,7 @@ contract ScopeToken is Context, IERC20, Ownable {
     mapping (address => bool) private _isExcludedFromFee;
 
     mapping (address => bool) private _isExcluded;
+    FeeInfo[] public _feeInfo;
     address[] private _excluded;
    
     uint256 private constant MAX = ~uint256(0);
@@ -720,7 +730,7 @@ contract ScopeToken is Context, IERC20, Ownable {
     bool public swapAndLiquifyEnabled = true;
     
     uint256 public _maxTxAmount = 5000000 * 10**9;
-    uint256 private numTokensSellToAddToLiquidity = 500000 * 10**9;
+    uint256 private numTokensSellToAddToLiquidity = 5000000 * 10**9;
     
     event MinTokensBeforeSwapUpdated(uint256 minTokensBeforeSwap);
     event SwapAndLiquifyEnabledUpdated(bool enabled);
@@ -728,6 +738,13 @@ contract ScopeToken is Context, IERC20, Ownable {
         uint256 tokensSwapped,
         uint256 ethReceived,
         uint256 tokensIntoLiqudity
+    );
+    event UpdateFee(
+        uint256 feeId,
+        uint256 rewardTaxFee,
+        uint256 liquidityFee,
+        uint256 burnFee,
+        uint256 treasuryFee
     );
     
     modifier lockTheSwap {
@@ -754,6 +771,51 @@ contract ScopeToken is Context, IERC20, Ownable {
         _isExcludedFromFee[owner()] = true;
         _isExcludedFromFee[address(this)] = true;
         _isExcludedFromFee[_treasuryAddress] = true;
+
+        _feeInfo.push(FeeInfo({
+            minAmount: 0,
+            maxAmount: 75 * 10**3 * 10**9,
+            rewardTaxFee: 5,
+            liquidityFee: 5,
+            burnFee: 1,
+            treasuryFee: 1
+        }));
+
+        _feeInfo.push(FeeInfo({
+            minAmount: 75 * 10**3 * 10**9,
+            maxAmount: 150 * 10**3 * 10**9,
+            rewardTaxFee: 8,
+            liquidityFee: 4,
+            burnFee: 1,
+            treasuryFee: 4
+        }));  
+
+        _feeInfo.push(FeeInfo({
+            minAmount: 150 * 10**3 * 10**9,
+            maxAmount: 300 * 10**3 * 10**9,
+            rewardTaxFee: 13,
+            liquidityFee: 9,
+            burnFee: 1,
+            treasuryFee: 7
+        })); 
+
+        _feeInfo.push(FeeInfo({
+            minAmount: 300 * 10**3 * 10**9,
+            maxAmount: 500 * 10**3 * 10**9,
+            rewardTaxFee: 20,
+            liquidityFee: 12,
+            burnFee: 1,
+            treasuryFee: 11
+        }));
+
+        _feeInfo.push(FeeInfo({
+            minAmount: 500 * 10**3 * 10**9,
+            maxAmount: _tTotal,
+            rewardTaxFee: 28,
+            liquidityFee: 15,
+            burnFee: 1,
+            treasuryFee: 16
+        }));                              
         
         emit Transfer(address(0), _msgSender(), _tTotal);
     }
@@ -820,14 +882,16 @@ contract ScopeToken is Context, IERC20, Ownable {
     function deliver(uint256 tAmount) public {
         address sender = _msgSender();
         require(!_isExcluded[sender], "Excluded addresses cannot call this function");
+        calculateTaxLevel(tAmount);
         (uint256 rAmount,,,,,) = _getValues(tAmount);
         _rOwned[sender] = _rOwned[sender].sub(rAmount);
         _rTotal = _rTotal.sub(rAmount);
         _tFeeTotal = _tFeeTotal.add(tAmount);
     }
 
-    function reflectionFromToken(uint256 tAmount, bool deductTransferFee) public view returns(uint256) {
+    function reflectionFromToken(uint256 tAmount, bool deductTransferFee) public returns(uint256) {
         require(tAmount <= _tTotal, "Amount must be less than supply");
+        calculateTaxLevel(tAmount);
         if (!deductTransferFee) {
             (uint256 rAmount,,,,,) = _getValues(tAmount);
             return rAmount;
@@ -891,12 +955,19 @@ contract ScopeToken is Context, IERC20, Ownable {
         _isExcludedFromFee[account] = false;
     }
     
-    function setTaxFeePercent(uint256 taxFee) external onlyOwner() {
-        _taxFee = taxFee;
-    }
-    
-    function setLiquidityFeePercent(uint256 liquidityFee) external onlyOwner() {
-        _liquidityFee = liquidityFee;
+    function setFeeInfo(uint256 feeId, uint256 taxFee, uint256 liquidityFee, uint256 burnFee, uint256 treasuryFee) external onlyOwner() {
+        require(feeId >= 0 && feeId < _feeInfo.length, 'SCOPE: Invalid fee Id');
+        require(taxFee > 0, 'SCOPE: Invalid reward tax fee');
+        require(liquidityFee > 0, 'SCOPE: Invalid liquidity fee');
+        require(burnFee > 0, 'SCOPE: Invalid burn fee');
+        require(treasuryFee > 0, 'SCOPE: Invalid treasury fee');
+        FeeInfo storage _info = _feeInfo[feeId];
+        _info.rewardTaxFee = taxFee;
+        _info.liquidityFee = liquidityFee;
+        _info.burnFee = burnFee;
+        _info.treasuryFee = treasuryFee;
+
+        emit UpdateFee(feeId, taxFee, liquidityFee, burnFee, treasuryFee);
     }
    
     function setMaxTxPercent(uint256 maxTxPercent) external onlyOwner() {
@@ -1010,7 +1081,26 @@ contract ScopeToken is Context, IERC20, Ownable {
         return _amount.mul(_treasuryFee).div(
             10**2
         );
-    }       
+    }    
+
+    function calculateTaxLevel(uint256 amount) private {
+
+        for (uint256 i = 0; i < _feeInfo.length; i++) {
+            FeeInfo memory _info = _feeInfo[i];
+            if (_info.minAmount <= amount && _info.maxAmount > amount) {
+                _taxFee = _info.rewardTaxFee;
+                _liquidityFee = _info.liquidityFee;
+                _burnFee = _info.burnFee;
+                _treasuryFee = _info.treasuryFee;
+
+                _previousTaxFee = _taxFee;
+                _previousLiquidityFee = _liquidityFee;
+                _previousBurnFee = _burnFee;
+                _previousTreasuryFee = _treasuryFee;
+                break;
+            }
+        }
+    }   
     
     function removeAllFee() private {
         if(_taxFee == 0 && _liquidityFee == 0 && _burnFee == 0 && _treasuryFee == 0) return;
@@ -1056,6 +1146,8 @@ contract ScopeToken is Context, IERC20, Ownable {
         if(from != owner() && to != owner())
             require(amount <= _maxTxAmount, "Transfer amount exceeds the maxTxAmount.");
 
+        // determine tax level
+        calculateTaxLevel(amount);
         // is the token balance of this contract address over the min number of
         // tokens that we need to initiate a swap + liquidity lock?
         // also, don't get caught in a circular liquidity event.
